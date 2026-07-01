@@ -39,32 +39,50 @@ jobs:
 
       - name: Clone kernel source
         run: |
-          git clone --depth=1 --branch ksun-test --recurse-submodules \
-            https://github.com/n0escape-exe/android_kernel_nothing_mt6886.git kernel
-          echo "=== Source tree ==="
-          ls kernel/common/ 2>/dev/null | head -10
-          echo "=== KernelSU ==="
-          ls kernel/common/drivers/kernelsu/ 2>/dev/null | head -5
+          git clone --depth=1 --branch ksun-test https://github.com/n0escape-exe/android_kernel_nothing_mt6886.git kernel
+          cd kernel
+          
+          # Initialize submodules manually (KernelSU)
+          git submodule update --init --recursive --depth=1 2>&1 || echo "Submodule init failed, trying manual..."
+          
+          # If submodule failed, clone KernelSU manually
+          if [ ! -d "common/KernelSU/kernel" ]; then
+            echo "=== Manual KernelSU clone ==="
+            cd common
+            git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU KernelSU
+            cd ..
+          fi
+          
+          # Verify
+          echo "=== KernelSU check ==="
+          ls common/KernelSU/kernel/ 2>/dev/null | head -5
+          ls common/drivers/kernelsu/ 2>/dev/null | head -5
+          
+          # If kernelsu is a broken symlink, fix it
+          if [ ! -f "common/drivers/kernelsu/Makefile" ]; then
+            echo "=== Fixing kernelsu symlink ==="
+            rm -f common/drivers/kernelsu
+            ln -sf ../KernelSU/kernel common/drivers/kernelsu
+            ls -la common/drivers/kernelsu
+          fi
 
       - name: Setup Clang
         run: |
-          # Download AOSP prebuilt clang
-          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz" -O clang.tar.gz 2>/dev/null || \
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release clang-repo
-          
-          if [ -f clang.tar.gz ]; then
-            mkdir -p clang && tar xzf clang.tar.gz -C clang
-            CLANG_BIN="$GITHUB_WORKSPACE/clang/bin"
-          else
-            CLANG_DIR=$(ls -d clang-repo/clang-* 2>/dev/null | head -1)
-            CLANG_BIN="$GITHUB_WORKSPACE/$CLANG_DIR/bin"
+          # Try downloading AOSP clang
+          cd kernel
+          if [ -d "prebuilts/clang/host/linux-x86" ]; then
+            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
           fi
           
-          # Verify clang works
-          $CLANG_BIN/clang --version | head -1
+          if [ -z "$CLANG_DIR" ]; then
+            echo "Downloading AOSP clang..."
+            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release ../clang-repo
+            CLANG_DIR=$(ls -d ../clang-repo/clang-* 2>/dev/null | head -1)
+          fi
           
-          # Save path
+          CLANG_BIN="$GITHUB_WORKSPACE/$CLANG_DIR/bin"
           echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
+          $CLANG_BIN/clang --version | head -1
 
       - name: Build kernel
         working-directory: kernel/common
@@ -77,7 +95,6 @@ jobs:
           export AR=llvm-ar
           export NM=llvm-nm
           export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
           export LLVM=1
           export LLVM_IAS=1
@@ -107,9 +124,7 @@ jobs:
           mkdir -p output
           cp kernel/common/arch/arm64/boot/Image output/ 2>/dev/null
           cp kernel/common/arch/arm64/boot/Image.lz4 output/ 2>/dev/null
-          
           find kernel/common/arch/arm64/boot/dts/mediatek/ -name "*.dtb" -o -name "*.dtbo" 2>/dev/null | while read f; do cp "$f" output/; done
-          
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cp output/* ak3/
           cd ak3 && zip -r9 ../output/nothing2a-kernel.zip . && cd ..
