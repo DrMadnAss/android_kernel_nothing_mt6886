@@ -34,51 +34,46 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
-            python3 zip unzip device-tree-compiler libfl-dev rsync wget
+            python3 zip unzip device-tree-compiler libfl-dev rsync
 
-      - name: Clone and prepare kernel source
+      - name: Clone and prepare kernel
         run: |
-          # Clone kernel source (no submodules - we'll handle KernelSU manually)
           git clone --depth=1 --branch ksun-test https://github.com/n0escape-exe/android_kernel_nothing_mt6886.git kernel
-          cd kernel/common
+          cd kernel
           
-          # Clone KernelSU (ReSukiSU) manually
-          echo "=== Cloning KernelSU ==="
+          # Clone KernelSU manually
+          cd common
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU KernelSU
           
-          # Fix the kernelsu symlink
-          echo "=== Fixing drivers/kernelsu ==="
-          rm -rf drivers/kernelsu 2>/dev/null
+          # Fix symlink
+          rm -rf drivers/kernelsu
           ln -sf ../KernelSU/kernel drivers/kernelsu
-          ls -la drivers/kernelsu/
           
-          # Verify Kconfig exists
-          cat drivers/kernelsu/Kconfig | head -5
-
-      - name: Setup Clang
-        run: |
-          # Download Proton Clang (well-known, works for MTK kernels)
-          cd kernel
-          git clone --depth=1 https://github.com/nicholaschum/aosp-clang.git ../clang-repo 2>/dev/null || true
+          # Verify
+          echo "=== KernelSU ==="
+          ls drivers/kernelsu/Kconfig
+          head -5 drivers/kernelsu/Kconfig
           
-          # Fallback: use system clang + aarch64 cross
-          if ! ls ../clang-repo/clang-*/bin/clang 2>/dev/null; then
-            echo "Using system clang..."
-            sudo apt-get install -y clang lld llvm
-            CLANG_BIN="/usr/bin"
-          else
-            CLANG_BIN=$(ls -d ../clang-repo/clang-*/bin | head -1)
-          fi
-          
-          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
-          $CLANG_BIN/clang --version | head -1
+          cd ../..
 
       - name: Build kernel
-        working-directory: kernel/common
+        working-directory: kernel
         run: |
+          # Use repo's prebuilt clang or system clang
+          CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+          if [ -n "$CLANG_DIR" ] && [ -f "$CLANG_DIR/bin/clang" ]; then
+            echo "Using repo clang: $CLANG_DIR"
+            export PATH="$CLANG_DIR/bin:$PATH"
+          else
+            echo "Using system clang"
+            sudo apt-get install -y clang lld llvm
+          fi
+          
+          clang --version | head -1
+          
           export ARCH=arm64
           export SUBARCH=arm64
-          export CC="${CLANG_BIN}/clang"
+          export CC=clang
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LD=ld.lld
           export AR=llvm-ar
@@ -87,10 +82,10 @@ jobs:
           export STRIP=llvm-strip
           export LLVM=1
           export LLVM_IAS=1
-          export PATH="${CLANG_BIN}:$PATH"
           
-          # Merge defconfigs
-          echo "=== Merging defconfigs ==="
+          cd common
+          
+          # Merge configs
           scripts/kconfig/merge_config.sh \
             arch/arm64/configs/gki_defconfig \
             arch/arm64/configs/mgk_64_k515_defconfig \
@@ -101,13 +96,11 @@ jobs:
           
           make olddefconfig
           
-          echo "=== Building kernel ==="
-          make -j$(nproc) 2>&1 | tee ../../build.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-          echo "=== Build exit: $BUILD_EXIT ==="
-          exit $BUILD_EXIT
+          echo "=== Building ==="
+          make -j$(nproc) 2>&1
+          echo "=== EXIT: ${PIPESTATUS[0]} ==="
 
-      - name: Package kernel
+      - name: Package
         if: success()
         run: |
           mkdir -p output
@@ -119,14 +112,14 @@ jobs:
           cd ak3 && zip -r9 ../output/nothing2a-kernel.zip . && cd ..
           ls -lah output/
 
-      - name: Upload artifacts
+      - name: Upload
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: nothing2a-kernel
           path: output/
 
-      - name: Create release
+      - name: Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
