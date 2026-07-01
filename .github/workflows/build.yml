@@ -33,9 +33,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bc bison build-essential ccache curl flex \
-            gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
+            clang gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
             python3 zip unzip device-tree-compiler libfl-dev rsync
           # Create ncurses symlinks for AOSP clang
+          # Symlink AOSP clang to system path for bpf tools
+          AOSP_CLANG=$(ls -d prebuilts/clang/host/linux-x86/clang-r487747c/bin/clang 2>/dev/null || ls -d clang-repo/clang-*/bin/clang 2>/dev/null | head -1)
+          if [ -n "$AOSP_CLANG" ]; then
+            sudo ln -sf "$AOSP_CLANG" /usr/local/bin/clang
+            sudo ln -sf "$(dirname $AOSP_CLANG)/ld.lld" /usr/local/bin/ld.lld 2>/dev/null || true
+          fi
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
 
