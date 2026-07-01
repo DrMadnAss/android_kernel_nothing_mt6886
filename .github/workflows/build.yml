@@ -32,30 +32,19 @@ jobs:
       - name: Setup build environment
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libncurses5 bc bison build-essential ccache curl flex \
-          # Create ncurses symlinks
-          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
-          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
             python3 zip unzip device-tree-compiler libfl-dev rsync
+          # Create ncurses symlinks for AOSP clang
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
 
       - name: Clone kernel and add KernelSU
         run: |
-          # Clone COMPLETE kernel source from AbzRaider (has all vendor files)
           git clone --depth=1 --branch mt6886/Pacman/t \
             https://github.com/AbzRaider/android_kernel-5.15_nothing_mt6886.git kernel
-          
           cd kernel
-          
-          # Add ReSukiSU + SuSFS
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          
-          # Verify KernelSU is integrated
-          echo "=== KernelSU ==="
-          ls drivers/kernelsu/Kconfig 2>/dev/null || echo "Kconfig missing"
-          head -5 drivers/kernelsu/Kconfig 2>/dev/null
-          
-          # Create KSU config fragment
           cat > arch/arm64/configs/kernelsu.config << 'EOF'
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
@@ -70,53 +59,25 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
-          
-          cd ..
-
-      - name: Setup Clang
-        run: |
-          # Download AOSP clang
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            -b android14-release clang-repo 2>/dev/null || true
-          
-          CLANG_DIR=$(ls -d clang-repo/clang-r487747c 2>/dev/null || ls -d clang-repo/clang-* 2>/dev/null | head -1)
-          if [ -n "$CLANG_DIR" ] && [ -f "$CLANG_DIR/bin/clang" ]; then
-            echo "Using AOSP clang: $CLANG_DIR"
-            echo "CLANG_BIN=$GITHUB_WORKSPACE/$CLANG_DIR/bin" >> $GITHUB_ENV
-          else
-            echo "Using system clang"
-            sudo apt-get install -y clang lld llvm
-            echo "CLANG_BIN=/usr/bin" >> $GITHUB_ENV
-          fi
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CC=clang
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export STRIP=llvm-strip
-          export LLVM=1
-          export LLVM_IAS=1
-          export PATH="${CLANG_BIN}:$PATH"
+          # Use AOSP clang from prebuilts
+          CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+          if [ -z "$CLANG_DIR" ] || [ ! -f "$CLANG_DIR/bin/clang" ]; then
+            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release ../clang-repo
+            CLANG_DIR=$(ls -d ../clang-repo/clang-r487747c 2>/dev/null || ls -d ../clang-repo/clang-* 2>/dev/null | head -1)
+          fi
+          export PATH="$CLANG_DIR/bin:$PATH"
+          clang --version | head -1
           
-          # Merge configs: gki_defconfig + pacman.config + kernelsu.config
-          scripts/kconfig/merge_config.sh \
-            arch/arm64/configs/gki_defconfig \
-            arch/arm64/configs/pacman.config \
-            arch/arm64/configs/kernelsu.config
+          export ARCH=arm64 SUBARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu-
+          export LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy STRIP=llvm-strip LLVM=1 LLVM_IAS=1
           
-          echo "=== KSU Config ==="
-          grep -E "CONFIG_KSU|CONFIG_KSU_SUSFS" .config
-          
+          scripts/kconfig/merge_config.sh arch/arm64/configs/gki_defconfig arch/arm64/configs/pacman.config arch/arm64/configs/kernelsu.config
+          grep -c "CONFIG_KSU" .config
           make olddefconfig
-          
-          echo "=== Building ==="
           make -j$(nproc) 2>&1
           EXIT=${PIPESTATUS[0]}
           echo "=== EXIT: $EXIT ==="
@@ -128,7 +89,6 @@ jobs:
           mkdir -p output
           cp kernel/arch/arm64/boot/Image output/ 2>/dev/null
           cp kernel/arch/arm64/boot/Image.lz4 output/ 2>/dev/null
-          find kernel/arch/arm64/boot/dts/mediatek/ -name "*.dtb" -o -name "*.dtbo" 2>/dev/null | while read f; do cp "$f" output/; done
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cp output/* ak3/
           cd ak3 && zip -r9 ../output/nothing2a-kernel.zip . && cd ..
