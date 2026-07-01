@@ -34,53 +34,42 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
-            python3 python3-pip zip unzip device-tree-compiler \
-            libfl-dev rsync
+            python3 zip unzip device-tree-compiler libfl-dev rsync wget
 
-      - name: Clone kernel source
+      - name: Clone and prepare kernel source
         run: |
+          # Clone kernel source (no submodules - we'll handle KernelSU manually)
           git clone --depth=1 --branch ksun-test https://github.com/n0escape-exe/android_kernel_nothing_mt6886.git kernel
-          cd kernel
+          cd kernel/common
           
-          # Initialize submodules manually (KernelSU)
-          git submodule update --init --recursive --depth=1 2>&1 || echo "Submodule init failed, trying manual..."
+          # Clone KernelSU (ReSukiSU) manually
+          echo "=== Cloning KernelSU ==="
+          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU KernelSU
           
-          # If submodule failed, clone KernelSU manually
-          if [ ! -d "common/KernelSU/kernel" ]; then
-            echo "=== Manual KernelSU clone ==="
-            cd common
-            git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU KernelSU
-            cd ..
-          fi
+          # Fix the kernelsu symlink
+          echo "=== Fixing drivers/kernelsu ==="
+          rm -rf drivers/kernelsu 2>/dev/null
+          ln -sf ../KernelSU/kernel drivers/kernelsu
+          ls -la drivers/kernelsu/
           
-          # Verify
-          echo "=== KernelSU check ==="
-          ls common/KernelSU/kernel/ 2>/dev/null | head -5
-          ls common/drivers/kernelsu/ 2>/dev/null | head -5
-          
-          # If kernelsu is a broken symlink, fix it
-          if [ ! -f "common/drivers/kernelsu/Makefile" ]; then
-            echo "=== Fixing kernelsu symlink ==="
-            rm -f common/drivers/kernelsu
-            ln -sf ../KernelSU/kernel common/drivers/kernelsu
-            ls -la common/drivers/kernelsu
-          fi
+          # Verify Kconfig exists
+          cat drivers/kernelsu/Kconfig | head -5
 
       - name: Setup Clang
         run: |
-          # Try downloading AOSP clang
+          # Download Proton Clang (well-known, works for MTK kernels)
           cd kernel
-          if [ -d "prebuilts/clang/host/linux-x86" ]; then
-            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+          git clone --depth=1 https://github.com/nicholaschum/aosp-clang.git ../clang-repo 2>/dev/null || true
+          
+          # Fallback: use system clang + aarch64 cross
+          if ! ls ../clang-repo/clang-*/bin/clang 2>/dev/null; then
+            echo "Using system clang..."
+            sudo apt-get install -y clang lld llvm
+            CLANG_BIN="/usr/bin"
+          else
+            CLANG_BIN=$(ls -d ../clang-repo/clang-*/bin | head -1)
           fi
           
-          if [ -z "$CLANG_DIR" ]; then
-            echo "Downloading AOSP clang..."
-            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release ../clang-repo
-            CLANG_DIR=$(ls -d ../clang-repo/clang-* 2>/dev/null | head -1)
-          fi
-          
-          CLANG_BIN="$GITHUB_WORKSPACE/$CLANG_DIR/bin"
           echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
           $CLANG_BIN/clang --version | head -1
 
