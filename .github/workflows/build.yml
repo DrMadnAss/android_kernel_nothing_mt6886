@@ -1,0 +1,169 @@
+name: "Build Nothing Phone 2a Kernel (KernelSU + SuSFS)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: "Build MT6886 Kernel"
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    env:
+      KERNEL_DIR: "common"
+      DEFCONFIG_BASE: "gki_defconfig"
+      DEFCONFIG_MTK: "mgk_64_k515_defconfig"
+      DEFCONFIG_EXTRA: "lineage.config"
+      ARCH: "arm64"
+      SUBARCH: "arm64"
+
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          remove-large-packages: 'true'
+          verbose: 'true'
+
+      - name: Setup SWAP 16GB
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
+      - name: Checkout source with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup build environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
+            python3 python3-pip zip unzip device-tree-compiler \
+            libfl-dev rsync
+
+      - name: Setup Clang toolchain
+        run: |
+          # Use AOSP prebuilt clang from the repo's prebuilts
+          if [ -d "prebuilts/clang/host/linux-x86" ]; then
+            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+            if [ -n "$CLANG_DIR" ]; then
+              echo "Using repo clang: $CLANG_DIR"
+              echo "PATH=$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
+            fi
+          fi
+          
+          # Fallback: download AOSP clang
+          if [ -z "$CLANG_DIR" ]; then
+            echo "Downloading AOSP clang..."
+            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release clang-toolchain
+            CLANG_PATH=$(ls -d clang-toolchain/clang-* 2>/dev/null | head -1)
+            echo "PATH=$GITHUB_WORKSPACE/$CLANG_PATH/bin:$PATH" >> $GITHUB_ENV
+          fi
+
+      - name: Build kernel
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          
+          # Merge configs: gki_defconfig + mgk_64_k515_defconfig + lineage.config
+          echo "=== Merging defconfigs ==="
+          scripts/kconfig/merge_config.sh \
+            arch/arm64/configs/${{ env.DEFCONFIG_BASE }} \
+            arch/arm64/configs/${{ env.DEFCONFIG_MTK }} \
+            arch/arm64/configs/${{ env.DEFCONFIG_EXTRA }}
+          
+          # Verify KSU/SUSFS config
+          echo "=== KSU Config ==="
+          grep -E "CONFIG_KSU|CONFIG_KSU_SUSFS" .config || echo "WARNING: KSU not in config!"
+          
+          make olddefconfig
+          
+          echo "=== Building kernel ==="
+          make -j$(nproc) 2>&1 | tee ../build.log
+          
+          echo "=== Build exit: ${PIPESTATUS[0]} ==="
+
+      - name: Package AnyKernel3
+        if: success()
+        run: |
+          mkdir -p output
+          
+          # Find kernel image
+          KERNEL_IMG=""
+          for f in common/arch/arm64/boot/Image common/arch/arm64/boot/Image.lz4; do
+            if [ -f "$f" ]; then
+              KERNEL_IMG="$f"
+              echo "Found kernel: $f ($(du -h "$f" | cut -f1))"
+              break
+            fi
+          done
+          
+          if [ -z "$KERNEL_IMG" ]; then
+            echo "ERROR: No kernel image found!"
+            ls -la common/arch/arm64/boot/
+            exit 1
+          fi
+          
+          cp "$KERNEL_IMG" output/
+          
+          # Find DTB/DTBO
+          for dtb in common/arch/arm64/boot/dts/mediatek/mt6886*.dtb common/arch/arm64/boot/dts/mediatek/k6886*.dtbo; do
+            if [ -f "$dtb" ]; then
+              cp "$dtb" output/
+              echo "DTB: $dtb"
+            fi
+          done
+          
+          # Create AnyKernel3 zip
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cp output/Image* ak3/
+          cp output/*.dtb output/*.dtbo ak3/ 2>/dev/null || true
+          
+          # Configure AnyKernel3 for Nothing Phone 2a (slot device)
+          cat > ak3/anykernel.sh << 'AK3EOF'
+          kernel.string=KernelSU-SuSFS-Nothing2a
+          do.devicecheck=0
+          is_slot_device=1
+          patch_vbmeta_flag=auto
+          block=auto
+          is_slot_device=1
+          ramdisk_compression=auto
+          AK3EOF
+          
+          cd ak3
+          zip -r9 ../output/nothing2a-kernel-kernelsu-susfs.zip .
+          cd ..
+          
+          echo "=== Output ==="
+          ls -lah output/
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nothing2a-kernel
+          path: output/
+
+      - name: Create release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v$(date +%Y%m%d)-ksu-susfs"
+          name: "Nothing Phone 2a Kernel - KernelSU + SuSFS - $(date +%Y-%m-%d)"
+          files: output/*
+          generate_release_notes: true
