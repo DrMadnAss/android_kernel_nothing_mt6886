@@ -39,109 +39,80 @@ jobs:
 
       - name: Clone kernel source
         run: |
-          echo "=== Cloning kernel source ==="
           git clone --depth=1 --branch ksun-test --recurse-submodules \
             https://github.com/n0escape-exe/android_kernel_nothing_mt6886.git kernel
-          echo "=== Clone done ==="
-          ls kernel/
-          echo "=== Common dir ==="
+          echo "=== Source tree ==="
           ls kernel/common/ 2>/dev/null | head -10
-          echo "=== KernelSU check ==="
-          ls kernel/common/KernelSU/ 2>/dev/null | head -5
+          echo "=== KernelSU ==="
           ls kernel/common/drivers/kernelsu/ 2>/dev/null | head -5
 
-      - name: Setup Clang toolchain
+      - name: Setup Clang
         run: |
-          cd kernel
-          # Check for prebuilt clang in repo
-          if [ -d "prebuilts/clang/host/linux-x86" ]; then
-            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
-            if [ -n "$CLANG_DIR" ]; then
-              echo "Using repo clang: $CLANG_DIR"
-              echo "CLANG_PATH=$GITHUB_WORKSPACE/$CLANG_DIR/bin" >> $GITHUB_ENV
-              echo "PATH=$GITHUB_WORKSPACE/$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
-              $CLANG_DIR/bin/clang --version | head -1
-              exit 0
-            fi
+          # Download AOSP prebuilt clang
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz" -O clang.tar.gz 2>/dev/null || \
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release clang-repo
+          
+          if [ -f clang.tar.gz ]; then
+            mkdir -p clang && tar xzf clang.tar.gz -C clang
+            CLANG_BIN="$GITHUB_WORKSPACE/clang/bin"
+          else
+            CLANG_DIR=$(ls -d clang-repo/clang-* 2>/dev/null | head -1)
+            CLANG_BIN="$GITHUB_WORKSPACE/$CLANG_DIR/bin"
           fi
           
-          # Fallback: download AOSP clang
-          echo "Downloading AOSP clang..."
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android14-release clang-toolchain
-          CLANG_PATH=$(ls -d clang-toolchain/clang-* 2>/dev/null | head -1)
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/$CLANG_PATH/bin" >> $GITHUB_ENV
-          echo "PATH=$GITHUB_WORKSPACE/$CLANG_PATH/bin:$PATH" >> $GITHUB_ENV
-          $CLANG_PATH/bin/clang --version | head -1
+          # Verify clang works
+          $CLANG_BIN/clang --version | head -1
+          
+          # Save path
+          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
 
       - name: Build kernel
         working-directory: kernel/common
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          export CC=clang
+          export CC="${CLANG_BIN}/clang"
           export CROSS_COMPILE=aarch64-linux-gnu-
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
           export LLVM=1
           export LLVM_IAS=1
+          export PATH="${CLANG_BIN}:$PATH"
           
-          # Merge configs
+          # Merge defconfigs
           echo "=== Merging defconfigs ==="
           scripts/kconfig/merge_config.sh \
             arch/arm64/configs/gki_defconfig \
             arch/arm64/configs/mgk_64_k515_defconfig \
             arch/arm64/configs/lineage.config
           
-          # Verify KSU/SUSFS
           echo "=== KSU Config ==="
           grep -E "CONFIG_KSU|CONFIG_KSU_SUSFS" .config
           
           make olddefconfig
           
-          echo "=== Building kernel (this takes 1-2 hours) ==="
-          make -j$(nproc) 2>&1 | tail -20
-          
-          BUILD_EXIT=$?
+          echo "=== Building kernel ==="
+          make -j$(nproc) 2>&1 | tee ../../build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
           echo "=== Build exit: $BUILD_EXIT ==="
           exit $BUILD_EXIT
 
-      - name: Find and package kernel
+      - name: Package kernel
         if: success()
         run: |
           mkdir -p output
+          cp kernel/common/arch/arm64/boot/Image output/ 2>/dev/null
+          cp kernel/common/arch/arm64/boot/Image.lz4 output/ 2>/dev/null
           
-          # Find kernel image
-          KERNEL_IMG=""
-          for f in kernel/common/arch/arm64/boot/Image kernel/common/arch/arm64/boot/Image.lz4; do
-            if [ -f "$f" ]; then
-              KERNEL_IMG="$f"
-              echo "Found kernel: $f ($(du -h "$f" | cut -f1))"
-              break
-            fi
-          done
+          find kernel/common/arch/arm64/boot/dts/mediatek/ -name "*.dtb" -o -name "*.dtbo" 2>/dev/null | while read f; do cp "$f" output/; done
           
-          if [ -z "$KERNEL_IMG" ]; then
-            echo "ERROR: No kernel image found!"
-            find kernel/common/arch/arm64/boot/ -type f 2>/dev/null
-            exit 1
-          fi
-          
-          cp "$KERNEL_IMG" output/
-          
-          # Find DTB/DTBO
-          find kernel/common/arch/arm64/boot/dts/mediatek/ -name "mt6886*.dtb" -o -name "k6886*.dtbo" 2>/dev/null | while read dtb; do
-            cp "$dtb" output/
-            echo "DTB: $dtb"
-          done
-          
-          # Create AnyKernel3 zip
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          cp output/Image* ak3/
-          cp output/*.dtb output/*.dtbo ak3/ 2>/dev/null || true
-          
-          cd ak3
-          zip -r9 ../output/nothing2a-kernel-kernelsu-susfs.zip .
-          cd ..
-          
-          echo "=== Output ==="
+          cp output/* ak3/
+          cd ak3 && zip -r9 ../output/nothing2a-kernel.zip . && cd ..
           ls -lah output/
 
       - name: Upload artifacts
@@ -156,6 +127,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v$(date +%Y%m%d)-ksu-susfs"
-          name: "Nothing Phone 2a Kernel - KernelSU + SuSFS - $(date +%Y-%m-%d)"
+          name: "Nothing Phone 2a Kernel - $(date +%Y-%m-%d)"
           files: output/*
           generate_release_notes: true
