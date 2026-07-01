@@ -33,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bc bison build-essential ccache curl flex \
-            clang gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
+            clang lld llvm gcc-aarch64-linux-gnu git libelf-dev libssl-dev lz4 \
             python3 zip unzip device-tree-compiler libfl-dev rsync
           # Create ncurses symlinks for AOSP clang
           # Symlink AOSP clang to system path for bpf tools
