@@ -70,11 +70,12 @@ jobs:
           done
 
           # Fix missing function return type
-          sed -i "s/^mt6985_enable_cm_bypass/static int mt6985_enable_cm_bypass/" sound/soc/mediatek/mt6985/mt6985-afe-cm.c 2>/dev/null
+          sed -i "s/^mt6985_enable_cm_bypass/int mt6985_enable_cm_bypass/" sound/soc/mediatek/mt6985/mt6985-afe-cm.c 2>/dev/null
 
           # Fix gpiolib.h include path
           mkdir -p drivers/pinctrl/gpio
-          ln -sf $PWD/drivers/gpio/gpiolib.h drivers/pinctrl/gpio/gpiolib.h
+          # Fix gpiolib.h include - change angle brackets to quotes
+          sed -i "s
 
           # Disable CONFIG_WERROR
           scripts/config --disable CONFIG_WERROR
